@@ -195,11 +195,14 @@
         touchStartX: 0,
         touchStartY: 0,
         touchStartTime: 0,
-        preloadedUrls: new Set(), // 已预加载的 URL 集合（轻量）
+        preloadedUrls: new Set(),
         pendingQueue: [],
-        preloadInFlight: new Set(), // 正在预加载中的图片
-        preloadQueue: [], // 等待预加载的队列
-        maxConcurrentPreloads: 1, // 最大并发预加载数（降低内存压力）
+        preloadInFlight: new Set(),
+        preloadQueue: [],
+        maxConcurrentPreloads: 1,
+        activeTime: 0,
+        lastActiveTime: Date.now(),
+        isVisible: true,
     };
 
     const imgEl = document.getElementById('main-img');
@@ -259,6 +262,54 @@
         }
     }
 
+    // ===================== 时间追踪（仅页面可见时计时） =====================
+    function saveTimerState() {
+        const data = {
+            doneInitial: state.doneInitial,
+            activeTime: state.activeTime,
+            lastActiveTime: state.lastActiveTime,
+            timestamp: Date.now(),
+        };
+        localStorage.setItem('photosifter_timer', JSON.stringify(data));
+    }
+
+    function loadTimerState() {
+        try {
+            const raw = localStorage.getItem('photosifter_timer');
+            if (!raw) return null;
+            const data = JSON.parse(raw);
+            return data;
+        } catch (e) {
+            return null;
+        }
+    }
+
+    function clearTimerState() {
+        localStorage.removeItem('photosifter_timer');
+    }
+
+    function onVisibilityChange() {
+        if (document.hidden) {
+            state.isVisible = false;
+            const now = Date.now();
+            state.activeTime += now - state.lastActiveTime;
+            saveTimerState();
+        } else {
+            state.isVisible = true;
+            state.lastActiveTime = Date.now();
+        }
+    }
+
+    document.addEventListener('visibilitychange', onVisibilityChange);
+
+    function getEffectiveElapsed() {
+        let elapsed = state.activeTime;
+        if (state.isVisible) {
+            elapsed += Date.now() - state.lastActiveTime;
+        }
+        return elapsed / 1000;
+    }
+
     // ===================== 状态更新 =====================
     async function updateStatus() {
         try {
@@ -272,9 +323,9 @@
             document.getElementById('bar-inner').style.transform = `scaleX(${percent / 100})`;
             document.getElementById('counts').innerText = `已处理: ${done} / 总计: ${total} (${percent.toFixed(1)}%)`;
 
-            // 计算预测时间
+            // 计算预测时间（仅基于活跃时间）
             if (done > state.doneInitial) {
-                const elapsed = (Date.now() - state.startTime) / 1000;
+                const elapsed = getEffectiveElapsed();
                 const perPhoto = elapsed / (done - state.doneInitial);
                 const remaining = (total - done) * perPhoto;
                 const mins = Math.floor(remaining / 60);
@@ -282,6 +333,7 @@
                 document.getElementById('eta').innerText = `预计剩余: ${mins}分${secs}秒`;
             } else if (total > 0 && done === total) {
                 document.getElementById('eta').innerText = '已完成！';
+                clearTimerState();
             }
 
             // 更新 pending 队列用于预加载
@@ -515,10 +567,22 @@
         .then(res => res.json())
         .then(data => {
             state.doneInitial = data.done;
-            state.startTime = Date.now();
             if (data.pending) {
                 state.pendingQueue = data.pending;
             }
+
+            // 尝试恢复上次的计时状态
+            const saved = loadTimerState();
+            if (saved && saved.doneInitial === state.doneInitial) {
+                // 只有处理进度相同时才恢复，避免跨会话数据混乱
+                state.activeTime = saved.activeTime || 0;
+                state.lastActiveTime = Date.now();
+            } else {
+                state.activeTime = 0;
+                state.lastActiveTime = Date.now();
+                if (saved) clearTimerState();
+            }
+
             updateStatus();
         })
         .catch(err => {
